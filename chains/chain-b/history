@@ -1,0 +1,6 @@
+eth.accounts
+eth.getBalance(eth.accounts[0]).toString()
+eth.getTransactionReceipt("0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4").contractAddress
+eth.sendTransaction({from: eth.accounts[0], to: eth.accounts[0], value: 0})
+eth.getTransactionReceipt("0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4").contractAddress
+eth.getTransactionReceipt("0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4")

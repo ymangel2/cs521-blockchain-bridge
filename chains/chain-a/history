@@ -1,0 +1,14 @@
+eth.accounts
+eth.getBalance(eth.accounts[0]).toString()
+ls
+list
+var code = "0x60806040...";
+eth.sendTransaction({from: eth.accounts[0], data: code})
+var code = "0x608060405234801561001057600080fd5b50600080546001600160a01b0319163317905561010e806100326000396000f3fe608060405260043610601c5760003560e01c806360fe47b1146021575b600080fd5b6027602d565b6040516020806100f0833981016040528080518201919050505b6000546001600160a01b03163314605557600080fd5b600081905091905056fea2646970667358221220a9f7beac4ee69cb7b3a8be86f042efda6505c5fba0b7d9ff1e4b8c638d7c7a5c64736f6c63430008070033";
+eth.sendTransaction({from: eth.accounts[0], data: code})
+> eth.sendTransaction({from: eth.accounts[0], data: code})
+eth.sendTransaction({from: eth.accounts[0], data: code})
+> eth.getTransactionReceipt(0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4).contractAddress
+eth.getTransactionReceipt(0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4).contractAddress
+eth.getTransactionReceipt("0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4").contractAddress
+eth.getTransactionReceipt("0xb88be97ddc2b546c4f0cc4b62de76de49c63c9eae6e35f30f15c20f7a053a2a4")

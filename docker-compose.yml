@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  chain-a:
+    image: ethereum/client-go:stable
+    container_name: chain-a
+    command: >
+      --dev
+      --http
+      --http.addr "0.0.0.0"
+      --http.api "eth,net,web3,personal"
+      --http.corsdomain "*"
+      --ws
+      --ws.addr "0.0.0.0"
+      --ws.api "eth,net,web3"
+    ports:
+      - "8545:8545"  # HTTP JSON-RPC
+      - "8546:8546"  # WebSocket RPC
+    volumes:
+      - chain-a-data:/root/.ethereum
+
+  chain-b:
+    image: ethereum/client-go:stable
+    container_name: chain-b
+    command: >
+      --dev
+      --http
+      --http.addr "0.0.0.0"
+      --http.api "eth,net,web3,personal"
+      --http.corsdomain "*"
+      --ws
+      --ws.addr "0.0.0.0"
+      --ws.api "eth,net,web3"
+    ports:
+      - "8547:8545"
+      - "8548:8546"
+    volumes:
+      - chain-b-data:/root/.ethereum
+
+#  relayer:
+#    build: ./relayer
+#    container_name: relayer
+#    depends_on:
+#      - chain-a
+#      - chain-b
+#    environment:
+#      - CHAIN_A_RPC=http://chain-a:8545
+#      - CHAIN_B_RPC=http://chain-b:8545
+
+volumes:
+  chain-a-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./chains/chain-a
+  chain-b-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./chains/chain-b
