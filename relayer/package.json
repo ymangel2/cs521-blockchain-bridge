@@ -1,0 +1,9 @@
+{
+  "name": "bridge-relayer",
+  "version": "1.0.0",
+  "description": "Monitors chain-a for Deposit events and mints on chain-b",
+  "main": "index.js",
+  "dependencies": {
+    "ethers": "^6.9.0"
+  }
+}

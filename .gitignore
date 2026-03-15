@@ -1,0 +1,11 @@
+node_modules/
+relayer/node_modules/
+artifacts/
+cache/
+coverage/
+coverage.json
+relayer/config.json
+chains/
+.env
+.env.local
+*.log

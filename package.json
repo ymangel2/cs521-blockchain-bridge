@@ -1,0 +1,17 @@
+{
+  "name": "cs521-blockchain-bridge",
+  "version": "1.0.0",
+  "description": "Simplified lock-and-mint bridge between two local EVM chains",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "node scripts/deploy.js",
+    "relayer": "node relayer/index.js"
+  },
+  "devDependencies": {
+    "hardhat": "^2.19.0",
+    "solc": "^0.8.19"
+  },
+  "dependencies": {
+    "ethers": "^6.9.0"
+  }
+}

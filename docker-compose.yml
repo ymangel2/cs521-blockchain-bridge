@@ -1,62 +1,30 @@
-version: "3.8"
-
 services:
+  # Override entrypoint so anvil runs directly with --host 0.0.0.0 (required for host access)
   chain-a:
-    image: ethereum/client-go:stable
+    image: ghcr.io/foundry-rs/foundry:latest
     container_name: chain-a
-    command: >
-      --dev
-      --http
-      --http.addr "0.0.0.0"
-      --http.api "eth,net,web3,personal"
-      --http.corsdomain "*"
-      --ws
-      --ws.addr "0.0.0.0"
-      --ws.api "eth,net,web3"
+    entrypoint: ["/usr/local/bin/anvil"]
+    command: ["--host", "0.0.0.0", "--port", "8545", "--block-time", "1"]
     ports:
-      - "8545:8545"  # HTTP JSON-RPC
-      - "8546:8546"  # WebSocket RPC
-    volumes:
-      - chain-a-data:/root/.ethereum
+      - "8545:8545"
 
   chain-b:
-    image: ethereum/client-go:stable
+    image: ghcr.io/foundry-rs/foundry:latest
     container_name: chain-b
-    command: >
-      --dev
-      --http
-      --http.addr "0.0.0.0"
-      --http.api "eth,net,web3,personal"
-      --http.corsdomain "*"
-      --ws
-      --ws.addr "0.0.0.0"
-      --ws.api "eth,net,web3"
+    entrypoint: ["/usr/local/bin/anvil"]
+    command: ["--host", "0.0.0.0", "--port", "8545", "--block-time", "1"]
     ports:
       - "8547:8545"
-      - "8548:8546"
+
+  relayer:
+    build: ./relayer
+    container_name: relayer
+    depends_on:
+      - chain-a
+      - chain-b
     volumes:
-      - chain-b-data:/root/.ethereum
-
-#  relayer:
-#    build: ./relayer
-#    container_name: relayer
-#    depends_on:
-#      - chain-a
-#      - chain-b
-#    environment:
-#      - CHAIN_A_RPC=http://chain-a:8545
-#      - CHAIN_B_RPC=http://chain-b:8545
-
-volumes:
-  chain-a-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./chains/chain-a
-  chain-b-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./chains/chain-b
+      - ./relayer/config.json:/app/config.json:ro
+    environment:
+      - CHAIN_A_RPC=http://chain-a:8545
+      - CHAIN_B_RPC=http://chain-b:8545
+    restart: unless-stopped
