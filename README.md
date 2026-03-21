@@ -31,9 +31,9 @@ The demo script (`scripts/demo-bridge.sh`) uses `cast` to call contracts. `cast`
 export TOKEN=$(jq -r '.chainA.token' relayer/config.json) VAULT=$(jq -r '.chainA.vault' relayer/config.json) WRAPPED=$(jq -r '.chainB.wrappedToken' relayer/config.json) USER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 ```
 
-- **TOKEN, VAULT, WRAPPED** – Contract addresses from the deploy output; the script reads them from `relayer/config.json`.
-- **USER** – Anvil's default first account; the demo uses it as sender.
-- **KEY** – That account's private key; required by `cast send` to sign transactions.
+- **TOKEN, VAULT, WRAPPED** - Contract addresses from the deploy output; the script reads them from `relayer/config.json`.
+- **USER** - Anvil's default first account; the demo uses it as sender.
+- **KEY** - That account's private key; required by `cast send` to sign transactions.
 
 Without these, the script would try to call `$VAULT` or `$WRAPPED` as literal strings and fail.
 
@@ -41,7 +41,7 @@ Without these, the script would try to call `$VAULT` or `$WRAPPED` as literal st
 
 ## Cast Output:
 
-**`cast send`** – Sends a transaction and prints the **transaction receipt** (block and tx metadata), not the return data. Example from `burn(uint256)`:
+**`cast send`** - Sends a transaction and prints the **transaction receipt** (block and tx metadata), not the return data. Example from `burn(uint256)`:
 
 ```
 blockHash            0x1f49f6d97ce008e43a467e9b29679281ede315527b13f4b95acc0a88cb9cdb28
@@ -57,26 +57,32 @@ logs                 [{"address":"...", "topics":["0xddf252ad...","0x000...92266
 ...
 ```
 
-- **status 1** – Tx succeeded.
-- **logs** – Event logs (here: `Transfer` to zero address and `Burn`).
-- **transactionHash** – Use for verification or relayer processing.
+- **status 1** - Tx succeeded.
+- **logs** - Event logs (here: `Transfer` to zero address and `Burn`).
+- **transactionHash** - Use for verification or relayer processing.
 
-**`cast call`** – Simulates a call and prints the **return value** of the function (e.g. `balanceOf` → raw uint256). The script pipes this through `cast --to-unit {} ether` to display human-readable amounts like `100.0`.
+**`cast call`** - Simulates a call and prints the **return value** of the function (e.g. `balanceOf` → raw uint256). The script pipes this through `cast --to-unit {} ether` to display human-readable amounts like `100.0`.
 
 ---
 
-## Architecture Components
+## Architecture: Tools and Components
 
-### Chains (Anvil)
+### Which Tools Are Used and Why? 
 
-- **chain-a** – Port 8545, source chain
-- **chain-b** – Port 8547, destination chain
+This project uses Foundry, which is a fast, Rust-based toolkit for Ethereum development that supports building, testing, and running local blockchain environments. Compared to full clients like Geth, Foundry enables lightweight, in-memory simulation of the Ethereum Virtual Machine (EVM) without the overhead of syncing or maintaining a full node. For contract development and deployment, Hardhat is used due to its flexible scripting and JavaScript-based workflow.
 
-Both run **Anvil** (Foundry's local EVM). Anvil is used for:
+### Chains
 
-- Fast local development
-- Deterministic accounts (e.g. `0xf39Fd...` with known keys)
-- Block production (`--block-time 1`)
+For the chains, we use Anvil Docker containers. Anvil is a lightweight local Ethereum node from Foundry that simulates an Ethereum Virtual Machine (EVM) in memory. It exposes standard JSON-RPC endpoints (see next section), making it compatible with tools like Hardhat and ethers.js, and enables fast, deterministic testing of smart contracts. In this project, separate Anvil instances are used to represent independent chains for simulating cross-chain interactions.
+
+### JSON-RPC Protocol
+
+JSON-RPC (Remote Procedure Call) is a protocol for sending JSON-formatted requests to a blockchain node over HTTP to facilitate interactions involving EVMs. Hardhat uses it to deploy compiled contracts by submitting transactions to the node, while the relayer uses it to poll for lock attestations and trigger mint transactions on the destination chain accordingly.
+
+We expose the following ports for JSON-RPC interactions with the Anvil nodes:
+
+- **chain-a** - Port 8545, source chain
+- **chain-b** - Port 8547, destination chain
 
 ### Smart Contracts
 
@@ -91,13 +97,7 @@ Both run **Anvil** (Foundry's local EVM). Anvil is used for:
 - **Lock-and-mint:** Watches chain-a for `Deposit` events, waits 3 confirmations, calls `mint(recipient, amount)` on WrappedToken on chain-b
 - **Burn-and-redeem:** Watches chain-b for `Burn` events, waits 3 confirmations, calls `release(burner, amount)` on Vault on chain-a
 
-**Signers:** The relayer uses `signerA` and `signerB`—ethers `Wallet` instances with the relayer's private key, each connected to a different chain's provider. To _submit_ transactions (mint on chain-b, release on chain-a), the relayer must sign them; a provider-only connection is read-only. `vaultWithSigner` is the Vault contract connected to `signerA`, so the relayer can call `release()` on chain-a. The WrappedToken is connected to `signerB` for `mint()` on chain-b.
-
-### Tools
-
-- **Foundry (cast)** – CLI for sending txs and calling contracts
-- **Hardhat** – Compiles Solidity
-- **Docker Compose** – Runs chain-a, chain-b, and relayer
+**Signers:** The relayer uses `signerA` and `signerB, which are ethers `Wallet` instances with the relayer's private key, each connected to a different chain's provider. To _submit_ transactions (mint on chain-b, release on chain-a), the relayer must sign them; a provider-only connection is read-only. `vaultWithSigner` is the Vault contract connected to `signerA`, so the relayer can call `release()` on chain-a. The WrappedToken is connected to `signerB` for `mint()` on chain-b.
 
 ---
 
