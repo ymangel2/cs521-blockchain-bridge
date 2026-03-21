@@ -97,7 +97,7 @@ async function main() {
   console.log(`  Token at ${tokenAddress}`);
 
   console.log("Chain A: deploying Vault...");
-  const vault = await deployContract(signerA, "Vault", nonceA++, tokenAddress);
+  const vault = await deployContract(signerA, "Vault", nonceA++, tokenAddress, DEPLOYER_ADDRESS);
   const vaultAddress = vault.target;
   console.log(`  Vault at ${vaultAddress}`);
 

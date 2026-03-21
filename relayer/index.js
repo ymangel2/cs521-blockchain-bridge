@@ -22,9 +22,11 @@ const ANVIL_NETWORK = ethers.Network.from(31337);
 
 const VAULT_ABI = [
   "event Deposit(address indexed sender, uint256 amount, uint256 indexed destChainId, uint256 blockNumber)",
+  "function release(address to, uint256 amount) external",
 ];
 const WRAPPED_TOKEN_ABI = [
   "function mint(address to, uint256 amount) external",
+  "event Burn(address indexed from, uint256 amount)",
 ];
 
 async function loadConfig() {
@@ -61,16 +63,19 @@ async function main() {
 
   const providerA = new ethers.JsonRpcProvider(chainA.rpc, ANVIL_NETWORK, { staticNetwork: ANVIL_NETWORK });
   const providerB = new ethers.JsonRpcProvider(chainB.rpc, ANVIL_NETWORK, { staticNetwork: ANVIL_NETWORK });
-  const signer = new ethers.Wallet(relayer.privateKey, providerB);
+  const signerA = new ethers.Wallet(relayer.privateKey, providerA);
+  const signerB = new ethers.Wallet(relayer.privateKey, providerB);
 
   const vault = new ethers.Contract(chainA.vault, VAULT_ABI, providerA);
+  const vaultWithSigner = new ethers.Contract(chainA.vault, VAULT_ABI, signerA);
   const wrappedToken = new ethers.Contract(
     chainB.wrappedToken,
     WRAPPED_TOKEN_ABI,
-    signer
+    signerB
   );
 
-  const processed = new Set();
+  const processedDeposits = new Set();
+  const processedBurns = new Set();
 
   console.log("Bridge Relayer started");
   console.log(`  Source (chain-a): ${chainA.rpc}`);
@@ -81,36 +86,90 @@ async function main() {
   console.log("");
 
   async function processDeposit(depositEvent) {
-    const key = `${depositEvent.transactionHash}-${depositEvent.logIndex}`;
-    if (processed.has(key)) return;
+    const logIndex = depositEvent.logIndex ?? depositEvent.index;
+    const key = `deposit:${depositEvent.transactionHash}-${logIndex}`;
+    if (processedDeposits.has(key)) return;
+    processedDeposits.add(key);
 
-    const sender = depositEvent.args[0];
-    const amount = depositEvent.args[1];
-    const blockNumber = Number(depositEvent.args[3]);
-
-    const currentBlock = await providerA.getBlockNumber();
-    const confirmations = currentBlock - blockNumber;
-    if (confirmations < CONFIRMATION_BLOCKS) {
-      console.log(
-        `  Deposit ${amount} from ${sender} at block ${blockNumber} - waiting for ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
-      );
-      return;
-    }
-
-    processed.add(key);
     try {
-      const tx = await wrappedToken.mint(sender, amount);
-      await tx.wait();
-      console.log(
-        `  MINTED ${ethers.formatEther(amount)} wBRG to ${sender} (tx: ${tx.hash})`
-      );
+      const sender = depositEvent.args[0];
+      const amount = depositEvent.args[1];
+      const blockNumber = Number(depositEvent.args[3]);
+
+      const currentBlock = await providerA.getBlockNumber();
+      const confirmations = currentBlock - blockNumber;
+      if (confirmations < CONFIRMATION_BLOCKS) {
+        processedDeposits.delete(key);
+        console.log(
+          `  Deposit ${amount} from ${sender} at block ${blockNumber} - waiting for ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
+        );
+        return;
+      }
+
+      try {
+        const tx = await wrappedToken.mint(sender, amount);
+        await tx.wait();
+        console.log(
+          `  MINTED ${ethers.formatEther(amount)} wBRG to ${sender} (tx: ${tx.hash})`
+        );
+      } catch (err) {
+        const duplicateTx = /already imported|replacement transaction/i.test(err.message);
+        if (duplicateTx) {
+          console.log(`  Mint already applied for ${sender} (duplicate tx ignored)`);
+        } else {
+          console.error(`  Mint failed for ${sender}: ${err.message}`);
+          processedDeposits.delete(key);
+        }
+      }
     } catch (err) {
-      console.error(`  Mint failed for ${sender}: ${err.message}`);
-      processed.delete(key);
+      processedDeposits.delete(key);
+      throw err;
     }
   }
 
-  async function poll() {
+  async function processBurn(burnEvent) {
+    const logIndex = burnEvent.logIndex ?? burnEvent.index;
+    const key = `burn:${burnEvent.transactionHash}-${logIndex}`;
+    if (processedBurns.has(key)) return;
+    processedBurns.add(key);
+
+    try {
+      const burner = burnEvent.args[0];
+      const amount = burnEvent.args[1];
+      const blockNumber = Number(burnEvent.blockNumber);
+
+      const currentBlock = await providerB.getBlockNumber();
+      const confirmations = currentBlock - blockNumber;
+      if (confirmations < CONFIRMATION_BLOCKS) {
+        processedBurns.delete(key);
+        console.log(
+          `  Burn ${amount} from ${burner} at block ${blockNumber} - waiting for ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
+        );
+        return;
+      }
+
+      try {
+        const tx = await vaultWithSigner.release(burner, amount);
+        await tx.wait();
+        console.log(
+          `  RELEASED ${ethers.formatEther(amount)} BRG to ${burner} (tx: ${tx.hash})`
+        );
+      } catch (err) {
+        const duplicateTx = /already imported|replacement transaction/i.test(err.message);
+        if (duplicateTx) {
+          console.log(`  Release already applied for ${burner} (duplicate tx ignored)`);
+        } else {
+          console.error(`  Release failed for ${burner}: ${err.message}`);
+          processedBurns.delete(key);
+        }
+      }
+    } catch (err) {
+      processedBurns.delete(key);
+      throw err;
+    }
+  }
+
+  async function pollDeposits() {
     try {
       const currentBlock = await providerA.getBlockNumber();
       const fromBlock = Math.max(0, currentBlock - 50);
@@ -120,20 +179,43 @@ async function main() {
         await processDeposit(e);
       }
     } catch (err) {
-      console.error("Poll error:", err.message);
+      console.error("Deposit poll error:", err.message);
+    }
+  }
+
+  async function pollBurns() {
+    try {
+      const wrapped = new ethers.Contract(chainB.wrappedToken, WRAPPED_TOKEN_ABI, providerB);
+      const currentBlock = await providerB.getBlockNumber();
+      const fromBlock = Math.max(0, currentBlock - 50);
+      const filter = wrapped.filters.Burn();
+      const events = await wrapped.queryFilter(filter, fromBlock, currentBlock);
+      for (const e of events) {
+        await processBurn(e);
+      }
+    } catch (err) {
+      console.error("Burn poll error:", err.message);
     }
   }
 
   // Process historical Deposit events (from block 0 in case we missed any)
-  const toBlock = await providerA.getBlockNumber();
-  const historicalFilter = vault.filters.Deposit();
-  const historical = await vault.queryFilter(historicalFilter, 0, toBlock);
-  for (const e of historical) {
+  const toBlockA = await providerA.getBlockNumber();
+  const historicalDeposits = await vault.queryFilter(vault.filters.Deposit(), 0, toBlockA);
+  for (const e of historicalDeposits) {
     await processDeposit(e);
   }
 
-  setInterval(poll, POLL_INTERVAL_MS);
-  console.log("Polling for new Deposit events...\n");
+  // Process historical Burn events
+  const wrappedRead = new ethers.Contract(chainB.wrappedToken, WRAPPED_TOKEN_ABI, providerB);
+  const toBlockB = await providerB.getBlockNumber();
+  const historicalBurns = await wrappedRead.queryFilter(wrappedRead.filters.Burn(), 0, toBlockB);
+  for (const e of historicalBurns) {
+    await processBurn(e);
+  }
+
+  setInterval(pollDeposits, POLL_INTERVAL_MS);
+  setInterval(pollBurns, POLL_INTERVAL_MS);
+  console.log("Polling for Deposit (chain-a) and Burn (chain-b) events...\n");
 }
 
 main().catch((err) => {

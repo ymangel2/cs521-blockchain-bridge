@@ -20,6 +20,7 @@ contract WrappedToken {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event Mint(address indexed to, uint256 amount);
+    event Burn(address indexed from, uint256 amount);
 
     constructor(address _minter) {
         require(_minter != address(0), "WrappedToken: zero minter");
@@ -76,6 +77,21 @@ contract WrappedToken {
         }
         emit Transfer(address(0), to, amount);
         emit Mint(to, amount);
+    }
+
+    /**
+     * @dev Burns wBRG. Relayer observes Burn and calls Vault.release on chain-a.
+     */
+    function burn(uint256 amount) external {
+        require(amount > 0, "WrappedToken: zero amount");
+        require(_balances[msg.sender] >= amount, "WrappedToken: insufficient balance");
+
+        unchecked {
+            _balances[msg.sender] -= amount;
+            _totalSupply -= amount;
+        }
+        emit Transfer(msg.sender, address(0), amount);
+        emit Burn(msg.sender, amount);
     }
 
     function _transfer(address from, address to, uint256 amount) internal {
