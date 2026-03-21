@@ -97,7 +97,7 @@ We expose the following ports for JSON-RPC interactions with the Anvil nodes:
 - **Lock-and-mint:** Watches chain-a for `Deposit` events, waits 3 confirmations, calls `mint(recipient, amount)` on WrappedToken on chain-b
 - **Burn-and-redeem:** Watches chain-b for `Burn` events, waits 3 confirmations, calls `release(burner, amount)` on Vault on chain-a
 
-**Signers:** The relayer uses `signerA` and `signerB, which are ethers `Wallet` instances with the relayer's private key, each connected to a different chain's provider. To _submit_ transactions (mint on chain-b, release on chain-a), the relayer must sign them; a provider-only connection is read-only. `vaultWithSigner` is the Vault contract connected to `signerA`, so the relayer can call `release()` on chain-a. The WrappedToken is connected to `signerB` for `mint()` on chain-b.
+**Signers:** The relayer uses `signerA` and `signerB`, which are ethers `Wallet` instances with the relayer's private key, each connected to a different chain's provider. To _submit_ transactions (mint on chain-b, release on chain-a), the relayer must sign them; a provider-only connection is read-only. `vaultWithSigner` is the Vault contract connected to `signerA`, so the relayer can call `release()` on chain-a. The WrappedToken is connected to `signerB` for `mint()` on chain-b.
 
 ---
 
