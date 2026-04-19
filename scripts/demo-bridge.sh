@@ -7,7 +7,7 @@
 #   4. Load addresses (run once in your shell):
 #      export TOKEN=$(jq -r '.chainA.token' relayer/config.json) VAULT=$(jq -r '.chainA.vault' relayer/config.json) WRAPPED=$(jq -r '.chainB.wrappedToken' relayer/config.json) USER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d DEPLOYER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 DEPLOYER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 #
-# Monitor relayer output: docker logs -f relayer (do not run "docker exec relayer node index.js" - that starts a 2nd relayer and causes double mint)
+# Monitor relayer output: docker logs -f relayer 
 # =============================================================================
 
 # --- STEP 0: Fund test user with BRG (deployer has all 1M from deploy) ---
@@ -43,9 +43,6 @@ echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $
 # Vault BRG balance. Expect: 100.0 (tokens are locked here)
 echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
-# --- STEP 4: Wait for relayer to mint (poll chain-b) ---
-# Wait ~15s for relayer to process Deposit event and mint on chain-b
-sleep 15
 
 # User wBRG balance on chain-b. Expect: 100.0 (100 wBRG minted)
 echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8547 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
@@ -58,9 +55,6 @@ cast send $WRAPPED "burn(uint256)" 100000000000000000000 \
 # User wBRG after burn. Expect: 0.0
 echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8547 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
-# --- STEP 6: Wait for relayer to release (poll chain-a) ---
-# Wait ~15s for relayer to process Burn event and release BRG on chain-a
-sleep 15
 
 # User BRG after release. Expect: 1000000.0 (100 BRG returned)
 echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
