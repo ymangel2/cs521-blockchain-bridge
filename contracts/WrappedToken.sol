@@ -3,33 +3,48 @@ pragma solidity ^0.8.19;
 
 /**
  * @title WrappedToken
- * @dev ERC-20 on the destination chain (chain-b). The relayer calls mint() when
- *      it observes a Deposit event on the source chain. Only the minter (relayer)
- *      can mint. Standard ERC-20 for composability with other dApps.
+ * @dev wBRG on chain-b. Minting requires 2-of-3 validator ECDSA attestations over the
+ *      source Deposit (tx hash + log index + recipient + amount). Plain mint() is disabled.
  */
 contract WrappedToken {
     string public name = "Wrapped Bridge Token";
     string public symbol = "wBRG";
     uint8 public decimals = 18;
 
-    address public minter;
+    bytes32 public constant ATTEST_DOMAIN = keccak256("BRIDGE_V1_DEPOSIT");
+
+    address[3] public validators;
+    uint256 public immutable threshold;
+    address public immutable vaultOnSource;
+    uint256 public immutable sourceChainId;
+
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
     uint256 private _totalSupply;
+
+    /// depositTxHash => logIndex => used
+    mapping(bytes32 => mapping(uint256 => bool)) public usedDepositAttestations;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event Mint(address indexed to, uint256 amount);
     event Burn(address indexed from, uint256 amount);
 
-    constructor(address _minter) {
-        require(_minter != address(0), "WrappedToken: zero minter");
-        minter = _minter;
-    }
-
-    modifier onlyMinter() {
-        require(msg.sender == minter, "WrappedToken: not minter");
-        _;
+    constructor(
+        address[3] memory _validators,
+        uint256 _threshold,
+        address _vaultOnSource,
+        uint256 _sourceChainId
+    ) {
+        require(_threshold > 0 && _threshold <= 3, "WrappedToken: bad threshold");
+        require(_vaultOnSource != address(0), "WrappedToken: zero vault");
+        for (uint256 i = 0; i < 3; i++) {
+            require(_validators[i] != address(0), "WrappedToken: zero validator");
+        }
+        validators = _validators;
+        threshold = _threshold;
+        vaultOnSource = _vaultOnSource;
+        sourceChainId = _sourceChainId;
     }
 
     function totalSupply() external view returns (uint256) {
@@ -64,12 +79,40 @@ contract WrappedToken {
         return true;
     }
 
+    /// @dev Legacy single-minter path disabled; use mintWithAttestation.
+    function mint(address, uint256) external pure {
+        revert("WrappedToken: use mintWithAttestation");
+    }
+
     /**
-     * @dev Called by the relayer when a Deposit is observed on the source chain.
+     * @dev Mint after threshold validators signed depositDigest(to, amount, depositTxHash, logIndex).
      */
-    function mint(address to, uint256 amount) external onlyMinter {
+    function mintWithAttestation(
+        address to,
+        uint256 amount,
+        bytes32 depositTxHash,
+        uint256 logIndex,
+        bytes[] calldata signatures,
+        address[] calldata signers
+    ) external {
         require(to != address(0), "WrappedToken: mint to zero");
         require(amount > 0, "WrappedToken: zero amount");
+        require(!usedDepositAttestations[depositTxHash][logIndex], "WrappedToken: deposit already minted");
+        require(signatures.length == signers.length, "WrappedToken: length mismatch");
+        require(signatures.length >= threshold, "WrappedToken: insufficient sigs");
+
+        bytes32 digest = depositDigest(to, amount, depositTxHash, logIndex);
+
+        for (uint256 i = 0; i < signers.length; i++) {
+            require(_isValidator(signers[i]), "WrappedToken: not validator");
+            for (uint256 j = i + 1; j < signers.length; j++) {
+                require(signers[i] != signers[j], "WrappedToken: duplicate signer");
+            }
+            address recovered = _recoverSigner(digest, signatures[i]);
+            require(recovered == signers[i], "WrappedToken: bad signature");
+        }
+
+        usedDepositAttestations[depositTxHash][logIndex] = true;
 
         _totalSupply += amount;
         unchecked {
@@ -79,9 +122,15 @@ contract WrappedToken {
         emit Mint(to, amount);
     }
 
-    /**
-     * @dev Burns wBRG. Relayer observes Burn and calls Vault.release on chain-a.
-     */
+    function depositDigest(
+        address to,
+        uint256 amount,
+        bytes32 depositTxHash,
+        uint256 logIndex
+    ) public view returns (bytes32) {
+        return keccak256(abi.encode(ATTEST_DOMAIN, sourceChainId, vaultOnSource, depositTxHash, logIndex, to, amount));
+    }
+
     function burn(uint256 amount) external {
         require(amount > 0, "WrappedToken: zero amount");
         require(_balances[msg.sender] >= amount, "WrappedToken: insufficient balance");
@@ -92,6 +141,25 @@ contract WrappedToken {
         }
         emit Transfer(msg.sender, address(0), amount);
         emit Burn(msg.sender, amount);
+    }
+
+    function _isValidator(address a) internal view returns (bool) {
+        return a == validators[0] || a == validators[1] || a == validators[2];
+    }
+
+    function _recoverSigner(bytes32 digest, bytes calldata sig) internal pure returns (address) {
+        require(sig.length == 65, "WrappedToken: bad sig length");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(sig.offset)
+            s := calldataload(add(sig.offset, 32))
+            v := byte(0, calldataload(add(sig.offset, 64)))
+        }
+        if (v < 27) v += 27;
+        bytes32 ethSigned = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
+        return ecrecover(ethSigned, v, r, s);
     }
 
     function _transfer(address from, address to, uint256 amount) internal {

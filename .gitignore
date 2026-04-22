@@ -5,6 +5,8 @@ cache/
 coverage/
 coverage.json
 relayer/config.json
+relayer/attestations/deposit/
+relayer/attestations/burn/
 chains/
 .env
 .env.local

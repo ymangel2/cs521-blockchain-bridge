@@ -24,7 +24,9 @@ services:
       - chain-b
     volumes:
       - ./relayer/config.json:/app/config.json:ro
+      - ./relayer/attestations:/app/attestations
     environment:
       - CHAIN_A_RPC=http://chain-a:8545
       - CHAIN_B_RPC=http://chain-b:8545
+      - ATTESTATIONS_DIR=/app/attestations
     restart: unless-stopped

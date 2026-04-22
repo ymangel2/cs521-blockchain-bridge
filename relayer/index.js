@@ -1,14 +1,10 @@
 #!/usr/bin/env node
 /**
- * Bridge Relayer
+ * Bridge relayer (submitter only)
  *
- * Monitors the source chain (chain-a) for Deposit events emitted by the Vault.
- * After waiting for CONFIRMATION_BLOCKS to mitigate 51% reorg risk, submits a
- * mint transaction to the WrappedToken contract on the destination chain (chain-b).
- *
- * Trust model: Off-chain verification. The relayer trusts its own observation
- * of the chain state (no on-chain Merkle proofs). Suitable for a simplified
- * course project.
+ * After Deposit / Burn finality, waits for 2-of-3 validator signature files under
+ * relayer/attestations/{deposit|burn}/<txHash>_<logIndex>/v{i}.sig, then submits
+ * mintWithAttestation / releaseWithAttestation.
  */
 
 const { ethers } = require("ethers");
@@ -22,12 +18,53 @@ const ANVIL_NETWORK = ethers.Network.from(31337);
 
 const VAULT_ABI = [
   "event Deposit(address indexed sender, uint256 amount, uint256 indexed destChainId, uint256 blockNumber)",
-  "function release(address to, uint256 amount) external",
+  "function releaseWithAttestation(address to,uint256 amount,bytes32 burnTxHash,uint256 logIndex,bytes[] signatures,address[] signers) external",
 ];
 const WRAPPED_TOKEN_ABI = [
-  "function mint(address to, uint256 amount) external",
+  "function mintWithAttestation(address to,uint256 amount,bytes32 depositTxHash,uint256 logIndex,bytes[] signatures,address[] signers) external",
   "event Burn(address indexed from, uint256 amount)",
 ];
+
+function attestationsRoot() {
+  return process.env.ATTESTATIONS_DIR || path.join(__dirname, "attestations");
+}
+
+function loadAttestationBundle(kind, txHash, logIndex, threshold, validators) {
+  const dir = path.join(attestationsRoot(), kind, `${txHash}_${logIndex}`);
+  if (!fs.existsSync(dir)) return null;
+
+  const entries = [];
+  for (let i = 0; i < validators.length; i++) {
+    const fp = path.join(dir, `v${i}.sig`);
+    if (!fs.existsSync(fp)) continue;
+    const sig = fs.readFileSync(fp, "utf8").trim();
+    if (!sig.startsWith("0x") || sig.length < 130) continue;
+    entries.push({ index: i, signature: sig, address: validators[i].address });
+  }
+  if (entries.length < threshold) return null;
+
+  entries.sort((a, b) => a.index - b.index);
+  const chosen = entries.slice(0, threshold);
+  return {
+    signatures: chosen.map((e) => e.signature),
+    signers: chosen.map((e) => e.address),
+  };
+}
+
+/** How many valid v*.sig files exist (for clearer logs). */
+function countValidSigFiles(kind, txHash, logIndex, validators) {
+  const dir = path.join(attestationsRoot(), kind, `${txHash}_${logIndex}`);
+  if (!fs.existsSync(dir)) return 0;
+  let n = 0;
+  for (let i = 0; i < validators.length; i++) {
+    const fp = path.join(dir, `v${i}.sig`);
+    if (!fs.existsSync(fp)) continue;
+    const sig = fs.readFileSync(fp, "utf8").trim();
+    if (!sig.startsWith("0x") || sig.length < 130) continue;
+    n++;
+  }
+  return n;
+}
 
 async function loadConfig() {
   const configPath = path.join(__dirname, "config.json");
@@ -40,7 +77,12 @@ async function loadConfig() {
       if (raw) {
         try {
           const config = JSON.parse(raw);
-          if (config.chainA?.vault && config.chainB?.wrappedToken) {
+          if (
+            config.chainA?.vault &&
+            config.chainB?.wrappedToken &&
+            config.validators?.length === 3 &&
+            config.threshold >= 1
+          ) {
             const code = await providerA.getCode(config.chainA.vault);
             if (code && code !== "0x") {
               if (process.env.CHAIN_A_RPC) config.chainA.rpc = process.env.CHAIN_A_RPC;
@@ -59,7 +101,7 @@ async function loadConfig() {
 
 async function main() {
   const config = await loadConfig();
-  const { chainA, chainB, relayer } = config;
+  const { chainA, chainB, relayer, validators, threshold } = config;
 
   const providerA = new ethers.JsonRpcProvider(chainA.rpc, ANVIL_NETWORK, { staticNetwork: ANVIL_NETWORK });
   const providerB = new ethers.JsonRpcProvider(chainB.rpc, ANVIL_NETWORK, { staticNetwork: ANVIL_NETWORK });
@@ -68,28 +110,24 @@ async function main() {
 
   const vault = new ethers.Contract(chainA.vault, VAULT_ABI, providerA);
   const vaultWithSigner = new ethers.Contract(chainA.vault, VAULT_ABI, signerA);
-  const wrappedToken = new ethers.Contract(
-    chainB.wrappedToken,
-    WRAPPED_TOKEN_ABI,
-    signerB
-  );
+  const wrappedToken = new ethers.Contract(chainB.wrappedToken, WRAPPED_TOKEN_ABI, signerB);
 
   const processedDeposits = new Set();
   const processedBurns = new Set();
 
-  console.log("Bridge Relayer started");
+  console.log("Bridge relayer started (attestation submitter)");
   console.log(`  Source (chain-a): ${chainA.rpc}`);
   console.log(`  Destination (chain-b): ${chainB.rpc}`);
   console.log(`  Vault: ${chainA.vault}`);
   console.log(`  WrappedToken: ${chainB.wrappedToken}`);
-  console.log(`  Confirmations: ${CONFIRMATION_BLOCKS}`);
+  console.log(`  Attestations: ${attestationsRoot()}`);
+  console.log(`  Confirmations: ${CONFIRMATION_BLOCKS}  threshold: ${threshold}`);
   console.log("");
 
   async function processDeposit(depositEvent) {
     const logIndex = depositEvent.logIndex ?? depositEvent.index;
     const key = `deposit:${depositEvent.transactionHash}-${logIndex}`;
     if (processedDeposits.has(key)) return;
-    processedDeposits.add(key);
 
     try {
       const sender = depositEvent.args[0];
@@ -99,31 +137,49 @@ async function main() {
       const currentBlock = await providerA.getBlockNumber();
       const confirmations = currentBlock - blockNumber;
       if (confirmations < CONFIRMATION_BLOCKS) {
-        processedDeposits.delete(key);
         console.log(
-          `  Deposit ${amount} from ${sender} at block ${blockNumber} - waiting for ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
+          `  Deposit ${amount} from ${sender} at block ${blockNumber} — waiting ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
+        );
+        return;
+      }
+
+      const bundle = loadAttestationBundle(
+        "deposit",
+        depositEvent.transactionHash,
+        logIndex,
+        threshold,
+        validators
+      );
+      if (!bundle) {
+        const have = countValidSigFiles("deposit", depositEvent.transactionHash, logIndex, validators);
+        console.log(
+          `  Deposit ${depositEvent.transactionHash} log ${logIndex} — attestations ${have}/${threshold} (need ${threshold} distinct v*.sig files; start validators with VALIDATOR_INDEX=0,1,2)`
         );
         return;
       }
 
       try {
-        const tx = await wrappedToken.mint(sender, amount);
-        await tx.wait();
-        console.log(
-          `  MINTED ${ethers.formatEther(amount)} wBRG to ${sender} (tx: ${tx.hash})`
+        const tx = await wrappedToken.mintWithAttestation(
+          sender,
+          amount,
+          depositEvent.transactionHash,
+          logIndex,
+          bundle.signatures,
+          bundle.signers
         );
+        await tx.wait();
+        processedDeposits.add(key);
+        console.log(`  MINTED ${ethers.formatEther(amount)} wBRG to ${sender} (tx: ${tx.hash})`);
       } catch (err) {
-        const duplicateTx = /already imported|replacement transaction/i.test(err.message);
-        if (duplicateTx) {
-          console.log(`  Mint already applied for ${sender} (duplicate tx ignored)`);
+        if (/deposit already minted|WrappedToken: deposit already minted/i.test(err.message || "")) {
+          processedDeposits.add(key);
+          console.log(`  Mint already recorded for deposit ${depositEvent.transactionHash} log ${logIndex}`);
         } else {
-          console.error(`  Mint failed for ${sender}: ${err.message}`);
-          processedDeposits.delete(key);
+          console.error(`  mintWithAttestation failed: ${err.message}`);
         }
       }
     } catch (err) {
-      processedDeposits.delete(key);
-      throw err;
+      console.error(`  processDeposit error: ${err.message}`);
     }
   }
 
@@ -131,7 +187,6 @@ async function main() {
     const logIndex = burnEvent.logIndex ?? burnEvent.index;
     const key = `burn:${burnEvent.transactionHash}-${logIndex}`;
     if (processedBurns.has(key)) return;
-    processedBurns.add(key);
 
     try {
       const burner = burnEvent.args[0];
@@ -141,31 +196,43 @@ async function main() {
       const currentBlock = await providerB.getBlockNumber();
       const confirmations = currentBlock - blockNumber;
       if (confirmations < CONFIRMATION_BLOCKS) {
-        processedBurns.delete(key);
         console.log(
-          `  Burn ${amount} from ${burner} at block ${blockNumber} - waiting for ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
+          `  Burn ${amount} from ${burner} at block ${blockNumber} — waiting ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
+        );
+        return;
+      }
+
+      const bundle = loadAttestationBundle("burn", burnEvent.transactionHash, logIndex, threshold, validators);
+      if (!bundle) {
+        const have = countValidSigFiles("burn", burnEvent.transactionHash, logIndex, validators);
+        console.log(
+          `  Burn ${burnEvent.transactionHash} log ${logIndex} — attestations ${have}/${threshold} (need ${threshold} distinct v*.sig files; start validators with VALIDATOR_INDEX=0,1,2)`
         );
         return;
       }
 
       try {
-        const tx = await vaultWithSigner.release(burner, amount);
-        await tx.wait();
-        console.log(
-          `  RELEASED ${ethers.formatEther(amount)} BRG to ${burner} (tx: ${tx.hash})`
+        const tx = await vaultWithSigner.releaseWithAttestation(
+          burner,
+          amount,
+          burnEvent.transactionHash,
+          logIndex,
+          bundle.signatures,
+          bundle.signers
         );
+        await tx.wait();
+        processedBurns.add(key);
+        console.log(`  RELEASED ${ethers.formatEther(amount)} BRG to ${burner} (tx: ${tx.hash})`);
       } catch (err) {
-        const duplicateTx = /already imported|replacement transaction/i.test(err.message);
-        if (duplicateTx) {
-          console.log(`  Release already applied for ${burner} (duplicate tx ignored)`);
+        if (/burn already released|Vault: burn already released/i.test(err.message || "")) {
+          processedBurns.add(key);
+          console.log(`  Release already recorded for burn ${burnEvent.transactionHash} log ${logIndex}`);
         } else {
-          console.error(`  Release failed for ${burner}: ${err.message}`);
-          processedBurns.delete(key);
+          console.error(`  releaseWithAttestation failed: ${err.message}`);
         }
       }
     } catch (err) {
-      processedBurns.delete(key);
-      throw err;
+      console.error(`  processBurn error: ${err.message}`);
     }
   }
 
@@ -173,8 +240,7 @@ async function main() {
     try {
       const currentBlock = await providerA.getBlockNumber();
       const fromBlock = Math.max(0, currentBlock - 50);
-      const filter = vault.filters.Deposit();
-      const events = await vault.queryFilter(filter, fromBlock, currentBlock);
+      const events = await vault.queryFilter(vault.filters.Deposit(), fromBlock, currentBlock);
       for (const e of events) {
         await processDeposit(e);
       }
@@ -188,8 +254,7 @@ async function main() {
       const wrapped = new ethers.Contract(chainB.wrappedToken, WRAPPED_TOKEN_ABI, providerB);
       const currentBlock = await providerB.getBlockNumber();
       const fromBlock = Math.max(0, currentBlock - 50);
-      const filter = wrapped.filters.Burn();
-      const events = await wrapped.queryFilter(filter, fromBlock, currentBlock);
+      const events = await wrapped.queryFilter(wrapped.filters.Burn(), fromBlock, currentBlock);
       for (const e of events) {
         await processBurn(e);
       }
@@ -198,18 +263,14 @@ async function main() {
     }
   }
 
-  // Process historical Deposit events (from block 0 in case we missed any)
   const toBlockA = await providerA.getBlockNumber();
-  const historicalDeposits = await vault.queryFilter(vault.filters.Deposit(), 0, toBlockA);
-  for (const e of historicalDeposits) {
+  for (const e of await vault.queryFilter(vault.filters.Deposit(), 0, toBlockA)) {
     await processDeposit(e);
   }
 
-  // Process historical Burn events
   const wrappedRead = new ethers.Contract(chainB.wrappedToken, WRAPPED_TOKEN_ABI, providerB);
   const toBlockB = await providerB.getBlockNumber();
-  const historicalBurns = await wrappedRead.queryFilter(wrappedRead.filters.Burn(), 0, toBlockB);
-  for (const e of historicalBurns) {
+  for (const e of await wrappedRead.queryFilter(wrappedRead.filters.Burn(), 0, toBlockB)) {
     await processBurn(e);
   }
 
