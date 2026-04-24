@@ -39,47 +39,71 @@
 set -e
 cd "$(dirname "$0")/.."
 
-# --- STEP 0: Fund test user with BRG (deployer has all 1M from deploy) ---
-cast send $TOKEN "transfer(address,uint256)" $USER 1000000000000000000000000 \
-  --private-key $DEPLOYER_KEY --rpc-url http://localhost:8545 > /dev/null 2>&1
+CHAIN_A_RPC="${CHAIN_A_RPC:-http://127.0.0.1:8545}"
+CHAIN_B_RPC="${CHAIN_B_RPC:-http://127.0.0.1:8547}"
+
+# --- STEP 0: Fund USER from deployer (up to 1M BRG); skip if deployer is empty ---
+CHAIN_A_RPC="$CHAIN_A_RPC" python3 <<'PY'
+import os, subprocess, sys
+rpc = os.environ["CHAIN_A_RPC"]
+fund = int("1000000000000000000000000")
+token = os.environ["TOKEN"]
+deployer = os.environ["DEPLOYER"]
+user = os.environ["USER"]
+key = os.environ["DEPLOYER_KEY"]
+raw = subprocess.check_output(
+    ["cast", "call", token, "balanceOf(address)(uint256)", deployer, "--rpc-url", rpc],
+    text=True,
+).split()[0]
+bal = int(raw, 16) if raw.startswith("0x") else int(raw)
+amt = min(bal, fund)
+if amt == 0:
+    print("Step 0: deployer BRG is 0 — skipping transfer (OK on repeat runs if USER already has BRG).")
+    sys.exit(0)
+subprocess.check_call(
+    ["cast", "send", token, "transfer(address,uint256)", user, str(amt),
+     "--private-key", key, "--rpc-url", rpc],
+)
+print(f"Step 0: transferred {amt} wei BRG deployer → USER (cap 1M tokens).")
+PY
 
 # --- STEP 1: Initial state ---
-echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
-echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
-echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8547 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_B_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
 # --- STEP 2: Approve Vault to spend 100 BRG ---
 cast send $TOKEN "approve(address,uint256)" $VAULT 100000000000000000000 \
-  --private-key $KEY --rpc-url http://localhost:8545
+  --private-key $KEY --rpc-url "$CHAIN_A_RPC"
 
-echo -n "Allowance (user→vault): "; cast call $TOKEN "allowance(address,address)(uint256)" $USER $VAULT --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "Allowance (user→vault): "; cast call $TOKEN "allowance(address,address)(uint256)" $USER $VAULT --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
 # --- STEP 3: Deposit (lock) 100 BRG into Vault ---
 cast send $VAULT "deposit(uint256)" 100000000000000000000 \
-  --private-key $KEY --rpc-url http://localhost:8545
+  --private-key $KEY --rpc-url "$CHAIN_A_RPC"
 
-echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
-echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
 # Validators need confirmation depth + time to write .sig files; relayer then mints.
 echo "Waiting for confirmations + 2-of-3 validator signatures + relayer mint..."
 sleep 12
 
 # --- STEP 4: Mint path (wBRG on chain-b) ---
-echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8547 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_B_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
 # --- STEP 5: Burn 100 wBRG on chain-b (reverse bridge) ---
 cast send $WRAPPED "burn(uint256)" 100000000000000000000 \
-  --private-key $KEY --rpc-url http://localhost:8547
+  --private-key $KEY --rpc-url "$CHAIN_B_RPC"
 
-echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8547 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "User wBRG (chain-b): "; cast call $WRAPPED "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_B_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
 echo "Waiting for confirmations + validator signatures + relayer release..."
 sleep 12
 
-echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 
-echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url http://localhost:8545 | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
+echo -n "Vault BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $VAULT --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
