@@ -5,7 +5,8 @@
   "scripts": {
     "compile": "hardhat compile",
     "deploy": "node scripts/deploy.js",
-    "relayer": "node relayer/index.js"
+    "relayer": "node relayer/index.js",
+    "throughput:concurrent": "node scripts/throughput-concurrent.js"
   },
   "devDependencies": {
     "hardhat": "^2.19.0",

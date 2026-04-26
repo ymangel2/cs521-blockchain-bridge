@@ -13,6 +13,17 @@ const path = require("path");
 
 const CONFIRMATION_BLOCKS = parseInt(process.env.CONFIRMATION_BLOCKS || "3", 10);
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "2000", 10);
+/** Anvil 1s blocks + 50 mints: default 5m so a slow queue does not block forever. */
+const TX_WAIT_TIMEOUT_MS = Math.max(1000, parseInt(process.env.TX_WAIT_TIMEOUT_MS || "300000", 10));
+/** Poll scans [currentBlock - POLL_LOOKBACK, current] each tick. A small window (e.g. 50) drops
+ *  older events: if a deposit was seen before attestations exist, the relayer never retries once
+ *  that block falls out of the window. Default 0 = scan from genesis (fine for Anvil; use env to cap on busier chains). */
+const POLL_LOOKBACK = (() => {
+  const v = process.env.POLL_LOOKBACK;
+  if (v === undefined || v === "") return 0;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+})();
 
 const ANVIL_NETWORK = ethers.Network.from(31337);
 
@@ -114,6 +125,24 @@ async function main() {
 
   const processedDeposits = new Set();
   const processedBurns = new Set();
+  /** One in-flight chain-b tx per deposit (burn) key — avoids duplicate eth_sendRawTransaction / -32003. */
+  const mintInFlight = new Set();
+  const releaseInFlight = new Set();
+  /** Same deposit/burn re-processed every poll; only log when status fingerprint changes. */
+  const lastEventStatus = new Map();
+
+  async function waitMinedOnChainB(tx) {
+    return tx.wait(1, TX_WAIT_TIMEOUT_MS);
+  }
+  async function waitMinedOnChainA(tx) {
+    return tx.wait(1, TX_WAIT_TIMEOUT_MS);
+  }
+
+  function shouldLogEvent(key, fingerprint) {
+    if (lastEventStatus.get(key) === fingerprint) return false;
+    lastEventStatus.set(key, fingerprint);
+    return true;
+  }
 
   console.log("Bridge relayer started (attestation submitter)");
   console.log(`  Source (chain-a): ${chainA.rpc}`);
@@ -137,9 +166,12 @@ async function main() {
       const currentBlock = await providerA.getBlockNumber();
       const confirmations = currentBlock - blockNumber;
       if (confirmations < CONFIRMATION_BLOCKS) {
-        console.log(
-          `  Deposit ${amount} from ${sender} at block ${blockNumber} — waiting ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
-        );
+        const deficit = CONFIRMATION_BLOCKS - confirmations;
+        if (shouldLogEvent(key, `conf:${deficit}`)) {
+          console.log(
+            `  Deposit ${amount} from ${sender} at block ${blockNumber} — waiting ${deficit} more confirmations`
+          );
+        }
         return;
       }
 
@@ -152,12 +184,16 @@ async function main() {
       );
       if (!bundle) {
         const have = countValidSigFiles("deposit", depositEvent.transactionHash, logIndex, validators);
-        console.log(
-          `  Deposit ${depositEvent.transactionHash} log ${logIndex} — attestations ${have}/${threshold} (need ${threshold} distinct v*.sig files; start validators with VALIDATOR_INDEX=0,1,2)`
-        );
+        if (shouldLogEvent(key, `sigsD:${have}`)) {
+          console.log(
+            `  Deposit ${depositEvent.transactionHash} log ${logIndex} — attestations ${have}/${threshold} (need ${threshold} distinct v*.sig files; start validators with VALIDATOR_INDEX=0,1,2)`
+          );
+        }
         return;
       }
 
+      if (processedDeposits.has(key) || mintInFlight.has(key)) return;
+      mintInFlight.add(key);
       try {
         const tx = await wrappedToken.mintWithAttestation(
           sender,
@@ -167,16 +203,39 @@ async function main() {
           bundle.signatures,
           bundle.signers
         );
-        await tx.wait();
+        const receipt = await waitMinedOnChainB(tx);
+        if (receipt == null) {
+          throw new Error("mint wait returned no receipt (tx may be dropped)");
+        }
+        if (receipt.status === 0) {
+          throw new Error("mint reverted (status 0)");
+        }
         processedDeposits.add(key);
+        lastEventStatus.delete(key);
         console.log(`  MINTED ${ethers.formatEther(amount)} wBRG to ${sender} (tx: ${tx.hash})`);
       } catch (err) {
-        if (/deposit already minted|WrappedToken: deposit already minted/i.test(err.message || "")) {
+        const msg = err.message || (err.toString && err.toString()) || "";
+        if (/deposit already minted|WrappedToken: deposit already minted/i.test(msg)) {
           processedDeposits.add(key);
+          lastEventStatus.delete(key);
           console.log(`  Mint already recorded for deposit ${depositEvent.transactionHash} log ${logIndex}`);
+        } else if (err?.code === "TIMEOUT" || /time[oU]ut|wait.*timeout|waited too long|TIMEOUT/i.test(msg)) {
+          if (shouldLogEvent(key, "mintWaitTO")) {
+            console.error(
+              `  Mint tx wait timeout (${TX_WAIT_TIMEOUT_MS}ms) for ${depositEvent.transactionHash} log ${logIndex} — will retry; ensure relayer has ETH on chain-b and blocks are being mined`
+            );
+          }
+        } else if (/transaction already imported|already imported/i.test(msg) || /-32003/.test(String(err))) {
+          if (shouldLogEvent(key, "mintDupe")) {
+            console.error(
+              `  Mint duplicate/ignored (-32003) for log ${logIndex} — not marking done; another poll or receipt should confirm the first tx`
+            );
+          }
         } else {
-          console.error(`  mintWithAttestation failed: ${err.message}`);
+          console.error(`  mintWithAttestation failed: ${msg}`);
         }
+      } finally {
+        mintInFlight.delete(key);
       }
     } catch (err) {
       console.error(`  processDeposit error: ${err.message}`);
@@ -196,21 +255,28 @@ async function main() {
       const currentBlock = await providerB.getBlockNumber();
       const confirmations = currentBlock - blockNumber;
       if (confirmations < CONFIRMATION_BLOCKS) {
-        console.log(
-          `  Burn ${amount} from ${burner} at block ${blockNumber} — waiting ${CONFIRMATION_BLOCKS - confirmations} more confirmations`
-        );
+        const deficit = CONFIRMATION_BLOCKS - confirmations;
+        if (shouldLogEvent(key, `conf:${deficit}`)) {
+          console.log(
+            `  Burn ${amount} from ${burner} at block ${blockNumber} — waiting ${deficit} more confirmations`
+          );
+        }
         return;
       }
 
       const bundle = loadAttestationBundle("burn", burnEvent.transactionHash, logIndex, threshold, validators);
       if (!bundle) {
         const have = countValidSigFiles("burn", burnEvent.transactionHash, logIndex, validators);
-        console.log(
-          `  Burn ${burnEvent.transactionHash} log ${logIndex} — attestations ${have}/${threshold} (need ${threshold} distinct v*.sig files; start validators with VALIDATOR_INDEX=0,1,2)`
-        );
+        if (shouldLogEvent(key, `sigsB:${have}`)) {
+          console.log(
+            `  Burn ${burnEvent.transactionHash} log ${logIndex} — attestations ${have}/${threshold} (need ${threshold} distinct v*.sig files; start validators with VALIDATOR_INDEX=0,1,2)`
+          );
+        }
         return;
       }
 
+      if (processedBurns.has(key) || releaseInFlight.has(key)) return;
+      releaseInFlight.add(key);
       try {
         const tx = await vaultWithSigner.releaseWithAttestation(
           burner,
@@ -220,26 +286,54 @@ async function main() {
           bundle.signatures,
           bundle.signers
         );
-        await tx.wait();
+        const receipt = await waitMinedOnChainA(tx);
+        if (receipt == null) {
+          throw new Error("release wait returned no receipt (tx may be dropped)");
+        }
+        if (receipt.status === 0) {
+          throw new Error("release reverted (status 0)");
+        }
         processedBurns.add(key);
+        lastEventStatus.delete(key);
         console.log(`  RELEASED ${ethers.formatEther(amount)} BRG to ${burner} (tx: ${tx.hash})`);
       } catch (err) {
-        if (/burn already released|Vault: burn already released/i.test(err.message || "")) {
+        const msg = err.message || (err.toString && err.toString()) || "";
+        if (/burn already released|Vault: burn already released/i.test(msg)) {
           processedBurns.add(key);
+          lastEventStatus.delete(key);
           console.log(`  Release already recorded for burn ${burnEvent.transactionHash} log ${logIndex}`);
+        } else if (err?.code === "TIMEOUT" || /time[oU]ut|wait.*timeout|waited too long|TIMEOUT/i.test(msg)) {
+          if (shouldLogEvent(key, "relWaitTO")) {
+            console.error(
+              `  Release tx wait timeout (${TX_WAIT_TIMEOUT_MS}ms) for ${burnEvent.transactionHash} log ${logIndex} — will retry; ensure relayer has ETH on chain-a`
+            );
+          }
+        } else if (/transaction already imported|already imported/i.test(msg) || /-32003/.test(String(err))) {
+          if (shouldLogEvent(key, "relDupe")) {
+            console.error(
+              `  Release duplicate/ignored (-32003) for log ${logIndex} — not marking done; will retry`
+            );
+          }
         } else {
-          console.error(`  releaseWithAttestation failed: ${err.message}`);
+          console.error(`  releaseWithAttestation failed: ${msg}`);
         }
+      } finally {
+        releaseInFlight.delete(key);
       }
     } catch (err) {
       console.error(`  processBurn error: ${err.message}`);
     }
   }
 
+  function pollFrom(currentBlock) {
+    if (POLL_LOOKBACK === 0) return 0;
+    return Math.max(0, currentBlock - POLL_LOOKBACK);
+  }
+
   async function pollDeposits() {
     try {
       const currentBlock = await providerA.getBlockNumber();
-      const fromBlock = Math.max(0, currentBlock - 50);
+      const fromBlock = pollFrom(currentBlock);
       const events = await vault.queryFilter(vault.filters.Deposit(), fromBlock, currentBlock);
       for (const e of events) {
         await processDeposit(e);
@@ -253,7 +347,7 @@ async function main() {
     try {
       const wrapped = new ethers.Contract(chainB.wrappedToken, WRAPPED_TOKEN_ABI, providerB);
       const currentBlock = await providerB.getBlockNumber();
-      const fromBlock = Math.max(0, currentBlock - 50);
+      const fromBlock = pollFrom(currentBlock);
       const events = await wrapped.queryFilter(wrapped.filters.Burn(), fromBlock, currentBlock);
       for (const e of events) {
         await processBurn(e);

@@ -67,6 +67,10 @@ subprocess.check_call(
 print(f"Step 0: transferred {amt} wei BRG deployer → USER (cap 1M tokens).")
 PY
 
+# Command to directly transfer funds from deployer to user:
+# cast send --private-key "$DEPLOYER_KEY" --rpc-url "$CHAIN_A_RPC" \
+#   "$TOKEN" "transfer(address,uint256)" "$USER" "1000000000000000000000000"
+
 # --- STEP 1: Initial state ---
 echo -n "User BRG (chain-a): "; cast call $TOKEN "balanceOf(address)(uint256)" $USER --rpc-url "$CHAIN_A_RPC" | cut -d' ' -f1 | xargs -I {} cast --to-unit {} ether
 

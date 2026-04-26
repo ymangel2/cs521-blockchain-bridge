@@ -19,6 +19,16 @@ const { depositDigest, burnDigest, signDigest } = require("./attestationCrypto")
 
 const CONFIRMATION_BLOCKS = parseInt(process.env.CONFIRMATION_BLOCKS || "3", 10);
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "2000", 10);
+const POLL_LOOKBACK = (() => {
+  const v = process.env.POLL_LOOKBACK;
+  if (v === undefined || v === "") return 0;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+})();
+function pollFrom(currentBlock) {
+  if (POLL_LOOKBACK === 0) return 0;
+  return Math.max(0, currentBlock - POLL_LOOKBACK);
+}
 
 const VAULT_ABI = [
   "event Deposit(address indexed sender, uint256 amount, uint256 indexed destChainId, uint256 blockNumber)",
@@ -129,12 +139,12 @@ function main() {
   async function poll() {
     try {
       const curA = await providerA.getBlockNumber();
-      const fromA = Math.max(0, curA - 50);
+      const fromA = pollFrom(curA);
       const deps = await vault.queryFilter(vault.filters.Deposit(), fromA, curA);
       for (const e of deps) await handleDeposit(e);
 
       const curB = await providerB.getBlockNumber();
-      const fromB = Math.max(0, curB - 50);
+      const fromB = pollFrom(curB);
       const burns = await wrapped.queryFilter(wrapped.filters.Burn(), fromB, curB);
       for (const e of burns) await handleBurn(e);
     } catch (err) {
